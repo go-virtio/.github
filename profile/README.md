@@ -20,22 +20,23 @@ runs — and now driving a real `virtio-gpu` device end-to-end (see
 
 | Repo | Latest | Role |
 | --- | --- | --- |
-| [`common`](https://github.com/go-virtio/common) | v0.1.4 | Transport-agnostic infrastructure: PCI capability walker, modern-config registers, split-virtqueue + **descriptor chaining**, device-class IDs, the `Transport` interface. |
+| [`common`](https://github.com/go-virtio/common) | v0.1.5 | Transport-agnostic infrastructure: PCI capability walker, modern-config registers, split-virtqueue + **descriptor chaining**, device-class IDs (now also centralizing the virtio-fs IDs), the `Transport` interface. |
 | [`net`](https://github.com/go-virtio/net) | v0.1.1 | virtio-net (DID 0x1041). Frame-level `TransmitFrame` / `ReceiveFrame` over a TX/RX queue pair. |
 | [`rng`](https://github.com/go-virtio/rng) | v0.1.1 | virtio-rng (DID 0x1044). Single-queue entropy `Read`. The minimal device class. |
 | [`vsock`](https://github.com/go-virtio/vsock) | v0.1.1 | virtio-vsock (DID 0x1053). Three queues; packet-level `SendPacket` / `ReceivePacket` with `virtio_vsock_hdr`. |
 | [`blk`](https://github.com/go-virtio/blk) | v0.2.0 | virtio-blk (DID 0x1042). `ReadBlocks` / `WriteBlocks` / `Flush`; requests are header + data + status descriptor chains. |
 | [`console`](https://github.com/go-virtio/console) | v0.1.0 | virtio-console (DID 0x1043). Raw byte-stream `Write` / `Read` over an rx/tx pair. |
 | [`balloon`](https://github.com/go-virtio/balloon) | v0.1.0 | virtio-balloon (DID 0x1045). `Inflate` / `Deflate` via le32 PFN arrays. |
-| [`gpu`](https://github.com/go-virtio/gpu) | v0.5.0 | virtio-gpu (DID 0x1050). **2D framebuffer** + **virgl 3D** (host-GPU `ClearScreen` / `DrawTriangle` / `DrawTexturedTriangle`) + a pure-Go **software 3D rasterizer** (`gpu/soft3d`). |
-| [`venus`](https://github.com/go-virtio/venus) | v0.2.0 | Groundwork for **Vulkan-over-virtio** (Venus): a `vk.xml`→Go serializer **generator** + runtime, validated offline against Mesa's wire encoding. Encoder + reply decoder; the ring transport is future work. |
-| [`validate`](https://github.com/go-virtio/validate) | v0.1.0 | Real-hardware validation harness: boots a TamaGo guest under QEMU, drives a real `virtio-gpu`, and asserts the rendered frame. |
+| [`gpu`](https://github.com/go-virtio/gpu) | v0.6.0 | virtio-gpu (DID 0x1050). **2D framebuffer** + **virgl 3D** (host-GPU `ClearScreen` / `DrawTriangle` / `DrawTexturedTriangle`) + a pure-Go **software 3D rasterizer** (`gpu/soft3d`). |
+| [`fs`](https://github.com/go-virtio/fs) | v0.2.0 | virtio-fs (DID 0x105A). FUSE-over-virtio **read-write** mount: Init/Lookup/Open/Read + Write/Create/Mkdir/SetAttr/Unlink/Rename/Fsync/… (each `fuse.h`-cited). |
+| [`venus`](https://github.com/go-virtio/venus) | v0.5.1 | **Vulkan-over-virtio** (Venus), end-to-end: a `vk.xml`→Go serializer/**generator** (offline byte-verified) **plus** a working shared-memory ring transport. A clear-image runs end-to-end on a real renderer — the guest submits the full Vulkan sequence (instance→device→image→clear→submit) over the ring to `virgl_test_server --venus` + lavapipe, and the host creates the image and executes the clear (host-confirmed). Guest-side pixel readback is the one remaining frontier — it needs a host with a DRM render node. |
+| [`validate`](https://github.com/go-virtio/validate) | v0.1.0 | Multi-driver real-hardware validation harness (tamago+QEMU) + a pure-Go virglrenderer/Venus vtest client. |
 
 ## How the pieces fit
 
 ```
-  net   rng   vsock   blk   console   balloon   gpu (2D + virgl 3D)     spec-level drivers
-   └─────┴──────┴──────┴───────┴────────┴─────────┘
+  net   rng   vsock   blk   console   balloon   gpu (2D + virgl 3D)   fs   spec-level drivers
+   └─────┴──────┴──────┴───────┴────────┴─────────┴──────┘
                             │
               ┌─────────────▼──────────────┐
               │       go-virtio/common      │                          transport-agnostic infra
@@ -66,9 +67,15 @@ different things:
   textured triangle are all validated against a real virglrenderer**
   (software llvmpipe, via the validate harness) — the textured one samples a
   2×2 texture into a smooth gradient across the primitive.
-- **Vulkan / Venus.** `venus` shows the Vulkan-over-virtio encoder is
-  mechanical and offline-verifiable; the shared-memory ring transport is
-  the remaining work. A separate subproject, not an incremental step.
+- **Vulkan / Venus.** `venus` is end-to-end — a `vk.xml`→Go
+  serializer/generator (offline byte-verified) **plus** a working
+  shared-memory ring transport, and a **clear-image runs end-to-end on a
+  real renderer**: the guest submits the full Vulkan command sequence
+  (instance→device→image→clear→submit) over the ring to
+  `virgl_test_server --venus` + lavapipe, and the host creates the image
+  and executes the clear (host-confirmed). Guest-side pixel readback is the
+  one remaining frontier — it needs a host with a DRM render node. A
+  separate subproject, not an incremental step.
 
 What is *not* feasible in pure Go: a full OpenGL/Vulkan API — that needs a
 Mesa-class GL→TGSI stack. Everything below that line is buildable, and
@@ -93,14 +100,29 @@ stream reads back red, `DrawTriangle` rasterizes, and
 flushed out two more bugs only a real renderer shows — `BIND_SHADER` was
 32 (= `SET_TESS_STATE`; fixed to 31), and the textured fragment shader's
 texcoord input defaulted to flat `CONSTANT` interpolation until declared
-`PERSPECTIVE`. Three real bugs, none visible against a fake device.
+`PERSPECTIVE`.
+
+The harness has since broadened well past gpu. It now
+hardware-validates **6 of the 8 drivers on real QEMU virtio-pci devices —
+gpu, blk, console, net, rng, balloon** — with byte-level round-trips: blk
+write then read-back, console echo, net frame both directions, rng live
+entropy, and balloon used-ring inflate/deflate. `vsock` is complete but
+needs a Linux host (QEMU's vhost-vsock is host-kernel-backed). On the 3D
+side, the virgl paths **and** the Venus clear-image are validated against a
+real `virglrenderer`/lavapipe via the `vtest/` half.
+
+The running theme: real-renderer / real-device validation has caught **7
+encoding bugs invisible to fake-device unit tests** — `SURFACE`=8,
+`BIND_SHADER`=31, the TGSI `PERSPECTIVE` interpolation, `SUBMIT_CMD2`
+framing, an `idleTimeout`, an object-id-0, and the `VkDeviceCreateInfo`
+`pEnabledFeatures` field. Real hardware sees what a fake cannot.
 
 ## Project standards
 
 - **Pure Go.** No cgo, no syscalls into a host driver, no kernel
   dependency.
 - **100% test coverage** is the bar, met on `rng`, `vsock`, `blk`,
-  `console`, `balloon`, `gpu` and the `venus`/`validate` Go;
+  `console`, `balloon`, `gpu`, `fs` and the `venus`/`validate` Go;
   `common` (~99%) and `net` (~99%) carry a few defensively-unreachable
   branches in code derived before the rule. Coverage is measured, not
   asserted.
