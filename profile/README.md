@@ -62,8 +62,10 @@ different things:
   on any host, no GPU. **Validated end-to-end** (it draws the cube below).
 - **virgl (host GPU).** `gpu` hand-encodes the virgl command stream
   (shaders shipped as TGSI *text*) so a host `virglrenderer` does the
-  drawing — real hardware acceleration, still CGO=0. Up to a textured
-  triangle today (marked experimental until hardware-validated).
+  drawing — real hardware acceleration, still CGO=0. **Clear and triangle
+  are validated against a real virglrenderer** (software llvmpipe, via the
+  validate harness); the textured triangle inherits the same fixes but
+  isn't run yet.
 - **Vulkan / Venus.** `venus` shows the Vulkan-over-virtio encoder is
   mechanical and offline-verifiable; the shared-memory ring transport is
   the remaining work. A separate subproject, not an incremental step.
@@ -83,6 +85,12 @@ not just against a fake. (Bringing it up surfaced two bugs a fake can't:
 the PCI cap-walk needs dword-granular config reads, and a board-init
 omission — the legacy 8259 PIC must be masked after switching to the I/O
 APIC.)
+
+The harness's `vtest/` half then validated the **virgl 3D** path against a
+real `virglrenderer` (software llvmpipe, no GPU): the clear stream reads
+back red, and `DrawTriangle` is accepted and rasterizes. That caught a
+second encoding bug only a real renderer shows — `BIND_SHADER` was 32
+(= `SET_TESS_STATE`), fixed to 31.
 
 ## Project standards
 
