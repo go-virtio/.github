@@ -62,10 +62,10 @@ different things:
   on any host, no GPU. **Validated end-to-end** (it draws the cube below).
 - **virgl (host GPU).** `gpu` hand-encodes the virgl command stream
   (shaders shipped as TGSI *text*) so a host `virglrenderer` does the
-  drawing — real hardware acceleration, still CGO=0. **Clear and triangle
-  are validated against a real virglrenderer** (software llvmpipe, via the
-  validate harness); the textured triangle inherits the same fixes but
-  isn't run yet.
+  drawing — real hardware acceleration, still CGO=0. **Clear, triangle and
+  textured triangle are all validated against a real virglrenderer**
+  (software llvmpipe, via the validate harness) — the textured one samples a
+  2×2 texture into a smooth gradient across the primitive.
 - **Vulkan / Venus.** `venus` shows the Vulkan-over-virtio encoder is
   mechanical and offline-verifiable; the shared-memory ring transport is
   the remaining work. A separate subproject, not an incremental step.
@@ -86,11 +86,14 @@ the PCI cap-walk needs dword-granular config reads, and a board-init
 omission — the legacy 8259 PIC must be masked after switching to the I/O
 APIC.)
 
-The harness's `vtest/` half then validated the **virgl 3D** path against a
-real `virglrenderer` (software llvmpipe, no GPU): the clear stream reads
-back red, and `DrawTriangle` is accepted and rasterizes. That caught a
-second encoding bug only a real renderer shows — `BIND_SHADER` was 32
-(= `SET_TESS_STATE`), fixed to 31.
+The harness's `vtest/` half then validated all three **virgl 3D** paths
+against a real `virglrenderer` (software llvmpipe, no GPU): the clear
+stream reads back red, `DrawTriangle` rasterizes, and
+`DrawTexturedTriangle` samples a 2×2 texture into a smooth gradient. That
+flushed out two more bugs only a real renderer shows — `BIND_SHADER` was
+32 (= `SET_TESS_STATE`; fixed to 31), and the textured fragment shader's
+texcoord input defaulted to flat `CONSTANT` interpolation until declared
+`PERSPECTIVE`. Three real bugs, none visible against a fake device.
 
 ## Project standards
 
