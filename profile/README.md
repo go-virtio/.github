@@ -28,9 +28,9 @@ runs — and now driving a real `virtio-gpu` device end-to-end (see
 | [`console`](https://github.com/go-virtio/console) | v0.1.0 | virtio-console (DID 0x1043). Raw byte-stream `Write` / `Read` over an rx/tx pair. |
 | [`balloon`](https://github.com/go-virtio/balloon) | v0.1.0 | virtio-balloon (DID 0x1045). `Inflate` / `Deflate` via le32 PFN arrays. |
 | [`gpu`](https://github.com/go-virtio/gpu) | v0.6.0 | virtio-gpu (DID 0x1050). **2D framebuffer** + **virgl 3D** (host-GPU `ClearScreen` / `DrawTriangle` / `DrawTexturedTriangle`) + a pure-Go **software 3D rasterizer** (`gpu/soft3d`). |
-| [`fs`](https://github.com/go-virtio/fs) | v0.2.0 | virtio-fs (DID 0x105A). FUSE-over-virtio **read-write** mount: Init/Lookup/Open/Read + Write/Create/Mkdir/SetAttr/Unlink/Rename/Fsync/… (each `fuse.h`-cited). |
-| [`venus`](https://github.com/go-virtio/venus) | v0.5.1 | **Vulkan-over-virtio** (Venus), end-to-end: a `vk.xml`→Go serializer/**generator** (offline byte-verified) **plus** a working shared-memory ring transport. A clear-image runs end-to-end on a real renderer — the guest submits the full Vulkan sequence (instance→device→image→clear→submit) over the ring to `virgl_test_server --venus` + lavapipe, and the host creates the image and executes the clear (host-confirmed). Guest-side pixel readback is the one remaining frontier — it needs a host with a DRM render node. |
-| [`validate`](https://github.com/go-virtio/validate) | v0.1.0 | Multi-driver real-hardware validation harness (tamago+QEMU) + a pure-Go virglrenderer/Venus vtest client. |
+| [`fs`](https://github.com/go-virtio/fs) | v0.2.1 | virtio-fs (DID 0x105A). FUSE-over-virtio **read-write** mount: Init/Lookup/Open/Read + Write/Create/Mkdir/SetAttr/Unlink/Rename/Fsync/… (each `fuse.h`-cited). v0.2.1 fixes a `fuse_attr` struct-size bug found by real-virtiofsd validation. |
+| [`venus`](https://github.com/go-virtio/venus) | v0.5.1 | **Vulkan-over-virtio** (Venus), full: a `vk.xml`→Go serializer/**generator** (offline byte-verified) **plus** a working shared-memory ring transport. A clear-image runs end-to-end on a real renderer — the guest submits the full Vulkan sequence (instance→device→image→clear→submit) over the ring to `virgl_test_server --venus` + lavapipe, the host creates the image and executes the clear, **and on a Linux render-node host the guest maps the cleared image's `HOST3D\|MAPPABLE` blob (gbm dma_buf) and reads the texels back as RED** — guest-side pixel readback included. |
+| [`validate`](https://github.com/go-virtio/validate) | v0.1.0 | Multi-driver real-hardware validation harness (tamago+QEMU) + a pure-Go virglrenderer/Venus vtest client. Validates all 8 drivers + virgl 3D + the full Venus clear-image-with-readback (on macOS QEMU + Linux hosts). |
 
 ## How the pieces fit
 
@@ -67,14 +67,15 @@ different things:
   textured triangle are all validated against a real virglrenderer**
   (software llvmpipe, via the validate harness) — the textured one samples a
   2×2 texture into a smooth gradient across the primitive.
-- **Vulkan / Venus.** `venus` is end-to-end — a `vk.xml`→Go
+- **Vulkan / Venus.** `venus` is full — a `vk.xml`→Go
   serializer/generator (offline byte-verified) **plus** a working
   shared-memory ring transport, and a **clear-image runs end-to-end on a
   real renderer**: the guest submits the full Vulkan command sequence
   (instance→device→image→clear→submit) over the ring to
   `virgl_test_server --venus` + lavapipe, and the host creates the image
-  and executes the clear (host-confirmed). Guest-side pixel readback is the
-  one remaining frontier — it needs a host with a DRM render node. A
+  and executes the clear. **Guest-side pixel readback is closed too**: on a
+  Linux render-node host the guest maps the cleared image's
+  `HOST3D|MAPPABLE` blob (gbm dma_buf) and reads the texels back as RED. A
   separate subproject, not an incremental step.
 
 What is *not* feasible in pure Go: a full OpenGL/Vulkan API — that needs a
@@ -102,20 +103,27 @@ flushed out two more bugs only a real renderer shows — `BIND_SHADER` was
 texcoord input defaulted to flat `CONSTANT` interpolation until declared
 `PERSPECTIVE`.
 
-The harness has since broadened well past gpu. It now
-hardware-validates **6 of the 8 drivers on real QEMU virtio-pci devices —
-gpu, blk, console, net, rng, balloon** — with byte-level round-trips: blk
-write then read-back, console echo, net frame both directions, rng live
-entropy, and balloon used-ring inflate/deflate. `vsock` is complete but
-needs a Linux host (QEMU's vhost-vsock is host-kernel-backed). On the 3D
-side, the virgl paths **and** the Venus clear-image are validated against a
-real `virglrenderer`/lavapipe via the `vtest/` half.
+The harness has since broadened well past gpu, and now **all 8 drivers are
+validated on real devices**. Six run on the macOS QEMU host — **gpu, blk,
+console, net, rng, balloon** — with byte-level round-trips: blk write then
+read-back, console echo, net frame both directions, rng live entropy, and
+balloon used-ring inflate/deflate. The last two need facilities macOS QEMU
+cannot provide, so they run on real Linux hosts (Debian arm64 VMs with
+`/dev/vhost-vsock`, a DRM render node, and KVM): **vsock** round-trips a
+real vsock packet between the guest driver and an `AF_VSOCK` host process
+via `vhost-vsock-pci`, and **fs** does read+write against a real
+`virtiofsd` over QEMU `vhost-user-fs` — the guest reads a file back
+byte-for-byte and writes one reflected on the host share. On the 3D side,
+the virgl paths **and** the full Venus clear-image-with-readback are
+validated against a real `virglrenderer`/lavapipe via the `vtest/` half.
 
-The running theme: real-renderer / real-device validation has caught **7
+The running theme: real-renderer / real-device validation has caught **9
 encoding bugs invisible to fake-device unit tests** — `SURFACE`=8,
 `BIND_SHADER`=31, the TGSI `PERSPECTIVE` interpolation, `SUBMIT_CMD2`
-framing, an `idleTimeout`, an object-id-0, and the `VkDeviceCreateInfo`
-`pEnabledFeatures` field. Real hardware sees what a fake cannot.
+framing, an `idleTimeout`, an object-id-0, the `VkDeviceCreateInfo`
+`pEnabledFeatures` field, `fuse_attr` being 88 bytes not 92 (fs, found by
+real virtiofsd), and virglrenderer 1.1.0 requiring `vkGetDeviceQueue2`
+(Venus). Real hardware sees what a fake cannot.
 
 ## Project standards
 
