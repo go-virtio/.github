@@ -2,7 +2,7 @@
 
 **Pure-Go, transport-agnostic virtio drivers.**
 
-`go-virtio` is a small family of Go modules that implement
+`go-virtio` is a family of Go modules that implement
 [virtio](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
 device-class drivers in pure Go — no cgo, no kernel — and route every
 transport-level operation through a narrow interface so the same driver
@@ -13,58 +13,91 @@ The point: replace the fragmented in-tree virtio code that lives inside
 each Go project with one reusable, well-tested, transport-pluggable set
 of drivers. Extracted from the [cloud-boot](https://github.com/cloud-boot)
 TamaGo + UEFI loader, but designed from day one to run anywhere virtio
-runs.
+runs — and now driving a real `virtio-gpu` device end-to-end (see
+[Validation](#validation)).
 
 ## Repositories
 
-| Repo                                                          | Role                                                                                                                |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| [`common`](https://github.com/go-virtio/common)               | Transport-agnostic infrastructure: PCI capability walker, modern-config layout, split-virtqueue, transport interfaces. |
-| [`net`](https://github.com/go-virtio/net)                     | Pure-Go virtio-net driver wrapping `common`. Implements the modern init sequence and split-virtqueue TX/RX path.   |
-| [`blk`](https://github.com/go-virtio/blk)                     | Pure-Go virtio-blk driver. Placeholder today; activates when a concrete pre-EBS caller needs it.                    |
+| Repo | Latest | Role |
+| --- | --- | --- |
+| [`common`](https://github.com/go-virtio/common) | v0.1.4 | Transport-agnostic infrastructure: PCI capability walker, modern-config registers, split-virtqueue + **descriptor chaining**, device-class IDs, the `Transport` interface. |
+| [`net`](https://github.com/go-virtio/net) | v0.1.1 | virtio-net (DID 0x1041). Frame-level `TransmitFrame` / `ReceiveFrame` over a TX/RX queue pair. |
+| [`rng`](https://github.com/go-virtio/rng) | v0.1.1 | virtio-rng (DID 0x1044). Single-queue entropy `Read`. The minimal device class. |
+| [`vsock`](https://github.com/go-virtio/vsock) | v0.1.1 | virtio-vsock (DID 0x1053). Three queues; packet-level `SendPacket` / `ReceivePacket` with `virtio_vsock_hdr`. |
+| [`blk`](https://github.com/go-virtio/blk) | v0.2.0 | virtio-blk (DID 0x1042). `ReadBlocks` / `WriteBlocks` / `Flush`; requests are header + data + status descriptor chains. |
+| [`console`](https://github.com/go-virtio/console) | v0.1.0 | virtio-console (DID 0x1043). Raw byte-stream `Write` / `Read` over an rx/tx pair. |
+| [`balloon`](https://github.com/go-virtio/balloon) | v0.1.0 | virtio-balloon (DID 0x1045). `Inflate` / `Deflate` via le32 PFN arrays. |
+| [`gpu`](https://github.com/go-virtio/gpu) | v0.5.0 | virtio-gpu (DID 0x1050). **2D framebuffer** + **virgl 3D** (host-GPU `ClearScreen` / `DrawTriangle` / `DrawTexturedTriangle`) + a pure-Go **software 3D rasterizer** (`gpu/soft3d`). |
+| [`venus`](https://github.com/go-virtio/venus) | v0.2.0 | Groundwork for **Vulkan-over-virtio** (Venus): a `vk.xml`→Go serializer **generator** + runtime, validated offline against Mesa's wire encoding. Encoder + reply decoder; the ring transport is future work. |
+| [`validate`](https://github.com/go-virtio/validate) | v0.1.0 | Real-hardware validation harness: boots a TamaGo guest under QEMU, drives a real `virtio-gpu`, and asserts the rendered frame. |
 
 ## How the pieces fit
 
 ```
-  ┌─────────────────────────────────────────────────────────────┐
-  │  go-virtio/net          go-virtio/blk        (future: gpu)  │   spec-level drivers
-  └──────────────┬─────────────────┬──────────────────────────────┘
-                 │                 │
-  ┌──────────────▼─────────────────▼──────────────────────────────┐
-  │                       go-virtio/common                         │   transport-agnostic infra
-  │   PCI cap walker · ModernConfig · split-virtqueue · iface     │
-  └──────────────┬─────────────────────────────────────────────────┘
-                 │  Transport interface (PCIConfigReader,
-                 │   BARMemoryAccessor, PageAllocator)
-  ┌──────────────▼─────────────────────────────────────────────────┐
-  │   EFI_PCI_IO_PROTOCOL · bare-metal MMIO · virtio-mmio · …     │   host backplane
-  └────────────────────────────────────────────────────────────────┘
+  net   rng   vsock   blk   console   balloon   gpu (2D + virgl 3D)     spec-level drivers
+   └─────┴──────┴──────┴───────┴────────┴─────────┘
+                            │
+              ┌─────────────▼──────────────┐
+              │       go-virtio/common      │                          transport-agnostic infra
+              │  PCI cap walker · ModernConfig · split-virtqueue ·     │
+              │  descriptor chaining · Transport interface             │
+              └─────────────┬──────────────┘
+                            │  Transport (PCIConfigReader,
+                            │   BARMemoryAccessor, PageAllocator)
+   ┌────────────────────────▼───────────────────────────────────────┐
+   │  EFI_PCI_IO_PROTOCOL · bare-metal MMIO · virtio-mmio · TamaGo …  │  host backplane
+   └─────────────────────────────────────────────────────────────────┘
 ```
 
 Every driver in `go-virtio/*` consumes `common.Transport` and nothing
 else. Swap the backplane, keep the driver.
 
+## The 3D story
+
+`go-virtio/gpu` makes the honest split explicit — "pure-Go 3D" is three
+different things:
+
+- **Software (CPU).** `gpu/soft3d` is a dependency-free, z-buffered
+  triangle rasterizer that renders into the virtio-gpu framebuffer. Works
+  on any host, no GPU. **Validated end-to-end** (it draws the cube below).
+- **virgl (host GPU).** `gpu` hand-encodes the virgl command stream
+  (shaders shipped as TGSI *text*) so a host `virglrenderer` does the
+  drawing — real hardware acceleration, still CGO=0. Up to a textured
+  triangle today (marked experimental until hardware-validated).
+- **Vulkan / Venus.** `venus` shows the Vulkan-over-virtio encoder is
+  mechanical and offline-verifiable; the shared-memory ring transport is
+  the remaining work. A separate subproject, not an incremental step.
+
+What is *not* feasible in pure Go: a full OpenGL/Vulkan API — that needs a
+Mesa-class GL→TGSI stack. Everything below that line is buildable, and
+much of it is built.
+
+## Validation
+
+`go-virtio/validate` boots a bare-metal [TamaGo](https://github.com/usbarmory/tamago)
+guest under QEMU, binds a `common.Transport` to a real `virtio-gpu-pci`
+device, runs `OpenVirtioGPU → SetupFramebuffer → soft3d.RenderCube →
+Flush`, and a host `screendump` confirms a shaded 3D cube at 320×240. The
+2D framebuffer + software rasterizer are proven on a real device model —
+not just against a fake. (Bringing it up surfaced two bugs a fake can't:
+the PCI cap-walk needs dword-granular config reads, and a board-init
+omission — the legacy 8259 PIC must be masked after switching to the I/O
+APIC.)
+
 ## Project standards
 
 - **Pure Go.** No cgo, no syscalls into a host driver, no kernel
   dependency.
-- **100% test coverage** is the bar on every module. `common` is at
-  ~96% en route to 100%; `net` is at 81% climbing to 100%.
+- **100% test coverage** is the bar, met on `rng`, `vsock`, `blk`,
+  `console`, `balloon`, `gpu` and the `venus`/`validate` Go;
+  `common` (~99%) and `net` (~99%) carry a few defensively-unreachable
+  branches in code derived before the rule. Coverage is measured, not
+  asserted.
 - **BSD-3-Clause** on all source files.
 - **Spec-traceable.** Every register, descriptor field, and feature bit
   carries a citation back to the Virtio 1.1 spec section it implements.
-- **Multi-arch.** Pure-Go code with no architecture-specific assembly,
-  so the same drivers work on amd64, arm64, riscv64, loongarch64.
-
-## Who uses it
-
-The first consumer is [cloud-boot](https://github.com/cloud-boot) —
-specifically the pure-UEFI TamaGo loader that drives the guest's
-virtio-net NIC during PXE / HTTP boot under Apple
-`Virtualization.framework` and KVM/OVMF. The intent is that any Go
-project running close to the metal (microVM runtimes, bootloaders,
-unikernels, test harnesses) can pull in `go-virtio/*` instead of
-re-implementing the same `struct virtio_pci_cap` walk.
+- **Multi-arch.** Pure-Go code with no architecture-specific assembly, so
+  the same drivers work on amd64, arm64, riscv64, loongarch64.
 
 ## Landing page
 
