@@ -22,23 +22,25 @@ runs — and now driving a real `virtio-gpu` device end-to-end (see
 
 | Repo | Latest | Role |
 | --- | --- | --- |
-| [`common`](https://github.com/go-virtio/common) | v0.1.5 | Transport-agnostic infrastructure: PCI capability walker, modern-config registers, split-virtqueue + **descriptor chaining**, device-class IDs (now also centralizing the virtio-fs IDs), the `Transport` interface. |
+| [`common`](https://github.com/go-virtio/common) | v0.1.6 | Transport-agnostic infrastructure: PCI capability walker, modern-config registers, split-virtqueue + **descriptor chaining**, device-class IDs (now also centralizing the virtio-fs IDs), the `Transport` interface. |
 | [`net`](https://github.com/go-virtio/net) | v0.1.1 | virtio-net (DID 0x1041). Frame-level `TransmitFrame` / `ReceiveFrame` over a TX/RX queue pair. |
 | [`rng`](https://github.com/go-virtio/rng) | v0.1.1 | virtio-rng (DID 0x1044). Single-queue entropy `Read`. The minimal device class. |
 | [`vsock`](https://github.com/go-virtio/vsock) | v0.1.1 | virtio-vsock (DID 0x1053). Three queues; packet-level `SendPacket` / `ReceivePacket` with `virtio_vsock_hdr`. |
 | [`blk`](https://github.com/go-virtio/blk) | v0.2.0 | virtio-blk (DID 0x1042). `ReadBlocks` / `WriteBlocks` / `Flush`; requests are header + data + status descriptor chains. |
 | [`console`](https://github.com/go-virtio/console) | v0.1.0 | virtio-console (DID 0x1043). Raw byte-stream `Write` / `Read` over an rx/tx pair. |
 | [`balloon`](https://github.com/go-virtio/balloon) | v0.1.0 | virtio-balloon (DID 0x1045). `Inflate` / `Deflate` via le32 PFN arrays. |
-| [`gpu`](https://github.com/go-virtio/gpu) | v0.6.0 | virtio-gpu (DID 0x1050). **2D framebuffer** + **virgl 3D** (host-GPU `ClearScreen` / `DrawTriangle` / `DrawTexturedTriangle`) + a pure-Go **software 3D rasterizer** (`gpu/soft3d`). |
+| [`input`](https://github.com/go-virtio/input) | main | virtio-input (DID 0x1052). Device-to-guest event read path (`ReadEvent`) mirroring Linux's `input_event`; keyboard + relative-pointer baseline. |
+| [`sound`](https://github.com/go-virtio/sound) | main | virtio-sound (DID 0x1059). Modern-transport init plus the minimum PCM playback + capture data paths over the control/tx/rx queues. |
+| [`gpu`](https://github.com/go-virtio/gpu) | v0.6.1 | virtio-gpu (DID 0x1050). **2D framebuffer** + **virgl 3D** (host-GPU `ClearScreen` / `DrawTriangle` / `DrawTexturedTriangle`) + a pure-Go **software 3D rasterizer** (`gpu/soft3d`). |
 | [`fs`](https://github.com/go-virtio/fs) | v0.2.1 | virtio-fs (DID 0x105A). FUSE-over-virtio **read-write** mount: Init/Lookup/Open/Read + Write/Create/Mkdir/SetAttr/Unlink/Rename/Fsync/… (each `fuse.h`-cited). v0.2.1 fixes a `fuse_attr` struct-size bug found by real-virtiofsd validation. |
 | [`venus`](https://github.com/go-virtio/venus) | v0.5.1 | **Vulkan-over-virtio** (Venus), full: a `vk.xml`→Go serializer/**generator** (offline byte-verified) **plus** a working shared-memory ring transport. A clear-image runs end-to-end on a real renderer — the guest submits the full Vulkan sequence (instance→device→image→clear→submit) over the ring to `virgl_test_server --venus` + lavapipe, the host creates the image and executes the clear, **and on a Linux render-node host the guest maps the cleared image's `HOST3D\|MAPPABLE` blob (gbm dma_buf) and reads the texels back as RED** — guest-side pixel readback included. |
-| [`validate`](https://github.com/go-virtio/validate) | v0.1.0 | Multi-driver real-hardware validation harness (tamago+QEMU) + a pure-Go virglrenderer/Venus vtest client. Validates all 8 drivers + virgl 3D + the full Venus clear-image-with-readback (on macOS QEMU + Linux hosts). |
+| [`validate`](https://github.com/go-virtio/validate) | v0.1.0 | Multi-driver real-hardware validation harness (tamago+QEMU) + a pure-Go virglrenderer/Venus vtest client. Validates 8 drivers (gpu, blk, console, net, rng, balloon, vsock, fs) + virgl 3D + the full Venus clear-image-with-readback (on macOS QEMU + Linux hosts); `input`/`sound` are not yet wired into the harness. |
 
 ## How the pieces fit
 
 ```
-  net   rng   vsock   blk   console   balloon   gpu (2D + virgl 3D)   fs   spec-level drivers
-   └─────┴──────┴──────┴───────┴────────┴─────────┴──────┘
+  net  rng  vsock  blk  console  balloon  fs  input  sound  gpu (2D + virgl 3D)   spec-level drivers
+   └────┴─────┴─────┴──────┴────────┴──────┴─────┴──────┴─────┴──────┘
                             │
               ┌─────────────▼──────────────┐
               │       go-virtio/common      │                          transport-agnostic infra
